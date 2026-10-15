@@ -1,0 +1,138 @@
+#!/bin/bash
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2017 Univention GmbH
+
+VERSION=2
+
+. /usr/share/univention-lib/all.sh
+. /usr/share/univention-join/joinscripthelper.lib
+. /usr/share/univention-appcenter/joinscripthelper.sh
+
+eval "$(univention-config-registry shell)"
+
+set -e
+
+joinscript_init
+
+# add service
+SERVICE="Wordpress"
+ucs_addServiceToLocalhost "$SERVICE" "$@"
+
+# create groups
+udm groups/group create "$@" --ignore_exists --position "cn=groups,$ldap_base" \
+	--set name="wordpress-editors" \
+	--set description="Members of this group are wordpress editors."
+udm groups/group create "$@" --ignore_exists --position "cn=groups,$ldap_base" \
+	--set name="wordpress-authors" \
+	--set description="Members of this group are wordpress authors."
+udm groups/group create "$@" --ignore_exists --position "cn=groups,$ldap_base" \
+	--set name="wordpress-contributors" \
+	--set description="Members of this group are wordpress contributors."
+udm groups/group create "$@" --ignore_exists --position "cn=groups,$ldap_base" \
+	--set name="wordpress-subscribers" \
+	--set description="Members of this group are wordpress subscribers."
+
+# config plugin
+wp_admin="wp-admin"
+wp_admin_email="wp-admin@$(ucr get domainname)"
+wp_language=""
+if [ "${locale_default%%.*}" = "de_DE" ]; then
+        wp_language="de_DE"
+fi
+wp_admin_password_file="/etc/wordpress-admin.secret"
+if [ -e "$wp_admin_password_file" ]; then
+        wp_admin_password="$(< $wp_admin_password_file)"
+else
+        touch "$wp_admin_password_file"
+        chmod 600 "$wp_admin_password_file"
+        wp_admin_password="$(makepasswd)"
+        echo "$wp_admin_password" > "$wp_admin_password_file"
+fi
+
+# config etc/ldap/ldap.conf and ca cert, TODO better ro mappings
+univention-app shell wordpress bash -e -c "mkdir -p /etc/ldap || true"
+univention-app shell wordpress bash -e -c "echo TLS_CACERT /etc/univention/ssl/ucsCA/CAcert.pem > /etc/ldap/ldap.conf"
+univention-app shell wordpress bash -e -c "mkdir -p /etc/univention/ssl/ucsCA || true"
+cp /etc/univention/ssl/ucsCA/CAcert.pem "$(joinscript_container_file /etc/univention/ssl/ucsCA/)"/
+
+# ldap bind user
+binddn="$appcenter_apps_wordpress_hostdn"
+bindpw="$(< $(joinscript_container_file /etc/machine.secret))"
+
+# only installation
+if [ $JS_LAST_EXECUTED_VERSION = 0 ]; then
+
+        # install wordpress
+        curl -s -X POST \
+                --cacert /etc/univention/ssl/ucsCA/CAcert.pem \
+                -d "language=$wp_language" \
+                https://$(hostname -f)/wordpress/wp-admin/install.php?step=1 >/dev/null
+
+        curl -s -X POST \
+                --cacert /etc/univention/ssl/ucsCA/CAcert.pem \
+                -d 'weblog_title=HelloWorld' \
+                -d "user_name=$wp_admin" \
+                --data-urlencode "admin_password=$wp_admin_password" \
+                --data-urlencode "admin_password2=$wp_admin_password" \
+                --data-urlencode "admin_email=$wp_admin_email" \
+                -d 'Submit=Install+WordPress' \
+                -d "language=$wp_language" \
+                https://$(hostname -f)/wordpress/wp-admin/install.php?step=2 >/dev/null
+
+        # logon
+        cookie=$(mktemp)
+        curl -s -c "$cookie" -X POST \
+                --cacert /etc/univention/ssl/ucsCA/CAcert.pem \
+                -d "log=$wp_admin" \
+                --data-urlencode "pwd=$wp_admin_password" \
+                -d 'wp-submit=Log+In' \
+                -d 'testcookie=1' \
+                -d 'rememberme=forever' \
+                https://$(hostname -f)/wordpress/wp-login.php >/dev/null
+
+        # search install nonce
+        nonce="$(curl -s -b "$cookie" -X POST \
+                --cacert /etc/univention/ssl/ucsCA/CAcert.pem \
+                https://$(hostname -f)'/wordpress/wp-admin/plugins.php?s=authldap&plugin_status=inactive' \
+                | grep 'action=activate' \
+                | egrep -o --color 'plugins.php\?action=activate[^"]*' \
+                | sed -n 's/.*_wpnonce=//p')"
+
+        # activate plugin
+        if [ -n "$nonce" ]; then
+                # activate
+                curl -s -b "$cookie" -X POST \
+                        --cacert /etc/univention/ssl/ucsCA/CAcert.pem \
+                        -d 'action=activate' \
+                        --data-urlencode 'plugin=authldap/authLdap.php' \
+                        --data-urlencode "_wpnonce=$nonce" \
+                        https://$(hostname -f)'/wordpress/wp-admin/plugins.php?action=activate'
+        fi
+        # configure ldap
+        curl -s -b "$cookie" -X POST \
+                --cacert /etc/univention/ssl/ucsCA/CAcert.pem \
+                -d 'authLDAPAuth=1' \
+                -d 'authLDAPGroupEnable=1' \
+                -d 'authLDAPStartTLS=1' \
+                -d 'authLDAPDefaultRole=subscriber' \
+                -d 'authLDAPGroupOverUser=1' \
+                -d 'authLDAPGroupAttr=cn' \
+                -d 'authLDAPNameAttr=givenName' \
+                -d 'authLDAPSecName=sn' \
+                -d 'authLDAPUidAttr=uid' \
+                -d 'authLDAPMailAttr=mailPrimaryAddress' \
+                --data-urlencode "authLDAPURI=ldap://${binddn}:${bindpw}@${ldap_server_name}:${ldap_server_port}/${ldap_base}" \
+                --data-urlencode "authLDAPGroups[administrator]=$(custom_groupname 'Domain Admins')" \
+                --data-urlencode 'authLDAPGroups[editor]=wordpress-editors' \
+                --data-urlencode 'authLDAPGroups[author]=wordpress-authors' \
+                --data-urlencode 'authLDAPGroups[contributor]=wordpress-contributors' \
+                --data-urlencode 'authLDAPGroups[subscriber]=wordpress-subscribers' \
+                -d 'ldapOptionsSave=Save+Changes' \
+                 https://$(hostname -f)'/wordpress/wp-admin/options-general.php?page=authLdap.php' >/dev/null
+        rm $cookie
+fi
+
+joinscript_save_current_version
+
+exit 0

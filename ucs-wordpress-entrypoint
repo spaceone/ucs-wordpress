@@ -1,0 +1,36 @@
+#!/bin/bash
+
+set -e
+
+if [ -n "${CA_CERT_URL}" ] && [ ! -f /etc/ldap/CAcert.pem ]; then
+	wget --no-check-certificate -O /etc/ldap/CAcert.pem "${CA_CERT_URL}"
+fi
+
+# install AuthLDAP plugin
+if [ ! -e /var/www/html/wp-content/plugins/authldap ]; then
+	cd /var/www/html/wp-content/plugins
+	mv /root/authldap.zip .
+	unzip -o authldap.zip
+	chown -R www-data:www-data authldap
+	chown www-data:www-data authldap.zip
+fi
+
+# added multi domain into single instance support, if WP_SITEURL is NOT already configured
+# this must be added after table_prefix, see
+# http://myjeeva.com/mapping-multiple-domains-into-single-instance-of-wordpress.html
+config="/var/www/html/wp-config.php"
+if ! grep -q "WP_SITEURL" "$config"; then
+wp_multi_domain="
+// Handle multi domain into single instance of wordpress installation
+define('WP_SITEURL', 'http://' . \$_SERVER['HTTP_HOST'] . '/wordpress');
+define('WP_HOME', 'http://' . \$_SERVER['HTTP_HOST'] . '/wordpress');
+//define('WP_CONTENT_URL', 'http://' . $_SERVER['HTTP_HOST'] . '/wordpress/wp-content');
+" perl -i -plne 'print qq[$ENV{"wp_multi_domain"}] if(/That.s all, stop editing!/);' "$config"
+fi
+
+cd /var/www/html
+test -L wordpress || ln -s . wordpress
+
+set -x
+exec apache2-foreground "$@"
+exec docker-php-entrypoint "$@"
