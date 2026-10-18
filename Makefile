@@ -9,6 +9,7 @@ build:
 .PHONY: run
 run:
 	docker run -d \
+		--name ucswordpress \
 		--restart unless-stopped \
 		-e "CA_CERT_URL=http://$(FQDN)/ucs-root-ca.crt" \
 		--env-file "$(CURDIR)/apps/wordpress/wordpress.env" \

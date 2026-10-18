@@ -51,9 +51,9 @@ else
 fi
 
 # config etc/ldap/ldap.conf and ca cert, TODO better ro mappings
-univention-app shell wordpress bash -e -c "mkdir -p /etc/ldap || true"
-univention-app shell wordpress bash -e -c "echo TLS_CACERT /etc/univention/ssl/ucsCA/CAcert.pem > /etc/ldap/ldap.conf"
-univention-app shell wordpress bash -e -c "mkdir -p /etc/univention/ssl/ucsCA || true"
+docker exec -it ucswordpress bash -e -c "mkdir -p /etc/ldap || true"
+docker exec -it ucswordpress bash -e -c "echo TLS_CACERT /etc/univention/ssl/ucsCA/CAcert.pem > /etc/ldap/ldap.conf"
+docker exec -it ucswordpress bash -e -c "mkdir -p /etc/univention/ssl/ucsCA || true"
 cp /etc/univention/ssl/ucsCA/CAcert.pem "$(joinscript_container_file /etc/univention/ssl/ucsCA/)"/
 
 # ldap bind user
